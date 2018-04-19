@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Copyright 2014-2017, Red Hat, Inc. and/or its affiliates, and individual
+    contributors by the @authors tag. 
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+-->
+<!-- Configures the Camel Context-->
+<beans xmlns="http://www.springframework.org/schema/beans"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="        http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd        http://camel.apache.org/schema/spring http://camel.apache.org/schema/spring/camel-spring.xsd">
+        <bean
+        class="org.springframework.jdbc.datasource.SimpleDriverDataSource" id="dataSource">
+        <property name="driverClass" value="com.microsoft.sqlserver.jdbc.SQLServerDriver"/>
+        <property name="url" value="jdbc:sqlserver://***.***.***.***:****;databaseName=**********;"/>
+        <property name="username" value="**********"/>
+        <property name="password" value="**********"/>
+    </bean>
+    <bean class="org.apache.activemq.ActiveMQConnectionFactory" id="activemq-connection-factory">
+        <property name="brokerURL" value="vm://amq?broker.persistent=false"/>
+        <property name="userName" value="admin"/>
+        <property name="password" value="admin"/>
+    </bean>
+    <bean class="org.apache.activemq.camel.component.ActiveMQComponent" id="activemq">
+        <property name="configuration">
+            <bean class="org.apache.activemq.camel.component.ActiveMQConfiguration">
+                <property name="connectionFactory" ref="activemq-connection-factory"/>
+            </bean>
+        </property>
+    </bean>
+    <camelContext id="_camelContextParse" xmlns="http://camel.apache.org/schema/spring">
+        <route id="parse">
+            <from id="_fromQueueParse" uri="activemq:parse"/>
+            <choice id="_choiceFileNameAfterUnzip">
+                <when id="_whenHostStatistics">
+                    <simple>${header.fileName} == 'HostStatistics.xml'</simple>
+                    <setHeader headerName="hostStatisticsID" id="_setHostStatisticsID">
+                        <simple>${header.rowID}</simple>
+                    </setHeader>
+                    <to id="_toQueueHostStatistics" uri="activemq:hostStatistics"/>
+                </when>
+                <otherwise id="_otherName">
+                    <setHeader headerName="timeToStartParsing" id="_setTimeToStartParsing">
+                        <simple>${date:now:yyyy-MM-dd hh:mm:ss.SSS}</simple>
+                    </setHeader>
+                    <to id="_whenOtherNameInsertIntoLOG_ACTION" uri="sql:SET NOCOUNT ON;INSERT INTO [dbo].[LOG_ACTION] ([File_ID],[Action_name_ID],[Status_ID],[Start_time]) VALUES (:#${header.rowID},5,1,:#${header.timeToStartParsing});?dataSource=#dataSource"/>
+                    <choice id="_whenFileName">
+                        <when id="_whenHostInfo">
+                            <simple>${header.fileName} == 'HostInfo.xml'</simple>
+                            <setHeader headerName="hardwareUuid" id="_setHardwareUuid">
+                                <xpath resultType="java.lang.String">//ParallelsHostInfo/HardwareUuid/text()</xpath>
+                            </setHeader>
+                            <to id="_whenHostInfoInsertIntoSA_HOSTINFO" uri="sql:INSERT INTO [dbo].[SA_HOSTINFO]([HardwareUuid],[File_ID]) VALUES (:#${header.hardwareUuid},:#${header.rowID});?dataSource=#dataSource"/>
+                        </when>
+                        <when id="_whenDiskInfo">
+                            <simple>${header.fileName} == 'DiskInfo.xml'</simple>
+                            <split id="_splitHardDisks">
+                                <xpath>//HardDisks/HardDisk</xpath>
+                                <setHeader headerName="model" id="_setModel">
+                                    <xpath resultType="java.lang.String">//HardDisk/Model</xpath>
+                                </setHeader>
+                                <to id="_diskInfoInsertIntoSA_DISKINFO" uri="sql:INSERT INTO [dbo].[SA_DISKINFO]([HardwareUuid],[Model]) VALUES ((SELECT [HardwareUuid] FROM [dbo].[SA_HOSTINFO] WHERE [File_ID] = ( SELECT [File_ID] FROM [dbo].[D_FILE] WHERE [Name] = 'HostInfo.xml' AND [Parent_ID] = (SELECT [Parent_ID] FROM [dbo].[D_FILE] WHERE NAME = 'HostStatistics.xml' AND [File_ID] = :#${header.hostStatisticsID}))),:#${header.model});?dataSource=#dataSource"/>
+                            </split>
+                        </when>
+                    </choice>
+                    <to id="_whenOtherNameUpdateLOG_ACTIONFinish" uri="sql:UPDATE [dbo].[LOG_ACTION] SET [Status_ID] = 2,[End_time]=:#${date:now:yyyy-MM-dd hh:mm:ss.SSS} WHERE [File_ID] = :#${header.rowID} AND [Start_time] = :#${header.timeToStartParsing};?dataSource=#dataSource"/>
+                </otherwise>
+            </choice>
+            <choice id="_choiceDirectory">
+                <when id="_whenParseFiles">
+                    <simple>${header.directory} == 'parse-files'</simple>
+                    <to id="_outputDirectoryParseFiles" uri="file:work/cbr/parse-files?fileName=${header.fileName}"/>
+                </when>
+                <when id="_whenExtractFiles">
+                    <simple>${header.directory} == 'extract-files'</simple>
+                    <to id="_outputDirectoryExtractFiles" uri="file:work/cbr/extract-files"/>
+                </when>
+            </choice>
+        </route>
+    </camelContext>
+</beans>
